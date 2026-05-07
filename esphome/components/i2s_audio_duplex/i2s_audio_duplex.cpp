@@ -477,6 +477,8 @@ static const size_t SPEAKER_BUFFER_BASE = 8192; // base speaker buffer, scaled b
 static const uint32_t I2S_IO_TIMEOUT_MS = 50;
 
 void I2SAudioDuplex::setup() {
+   // NUCLEAR OPTION: force enable stereo dual mic
+  this->use_stereo_dual_mic_ = true;
   ESP_LOGCONFIG(TAG, "Setting up I2S Audio Duplex...");
 
   // Mutex for the mic consumer registry. Plain FreeRTOS mutex (used as lock,
