@@ -67,6 +67,7 @@ CONF_TELEMETRY = "telemetry"
 CONF_TELEMETRY_LOG_INTERVAL_FRAMES = "telemetry_log_interval_frames"
 CONF_FIR_DECIMATOR = "fir_decimator"
 CONF_MIX_STEREO_TO_MONO = "mix_stereo_to_mono"
+CONF_STEREO_DUAL_MIC = "stereo_dual_mic"
 
 FIR_DECIMATOR_OPTIONS = ("custom", "dsps_fird_s16")
 
@@ -121,10 +122,19 @@ def _validate_tdm_config(config):
     """Validate TDM reference configuration."""
     use_tdm = config.get(CONF_USE_TDM_REFERENCE, False)
     use_stereo = config.get(CONF_USE_STEREO_AEC_REF, False)
+    use_stereo_dual_mic = config.get(CONF_STEREO_DUAL_MIC, False)
 
     if use_tdm and use_stereo:
         raise cv.Invalid(
             "use_tdm_reference and use_stereo_aec_reference are mutually exclusive"
+        )
+    if use_stereo_dual_mic and use_tdm:
+        raise cv.Invalid(
+            "stereo_dual_mic and use_tdm_reference are mutually exclusive"
+        )
+    if use_stereo_dual_mic and use_stereo:
+        raise cv.Invalid(
+            "stereo_dual_mic and use_stereo_aec_reference are mutually exclusive"
         )
 
     if use_tdm:
@@ -254,6 +264,10 @@ CONFIG_SCHEMA = cv.All(
         # Mix stereo I2S input (L+R) to mono before AEC processing.
         # Useful for dual digital MEMS mics sharing one DIN pin.
         cv.Optional(CONF_MIX_STEREO_TO_MONO, default=False): cv.boolean,
+        # Standard stereo dual-mic (ICS-43434 or similar discrete I2S mics on L+R slots)
+        # Enables both I2S slots as microphones for beamforming/BSS via esp_afe mic_num: 2.
+        # Not compatible with use_tdm_reference or use_stereo_aec_reference.
+        cv.Optional(CONF_STEREO_DUAL_MIC, default=False): cv.boolean,
     }).extend(cv.COMPONENT_SCHEMA),
     _validate_sample_rates,
     _validate_tdm_config,
@@ -400,6 +414,9 @@ async def to_code(config):
     cg.add(var.set_audio_stack_in_psram(config[CONF_AUDIO_STACK_IN_PSRAM]))
     cg.add(var.set_fir_decimator_custom(config[CONF_FIR_DECIMATOR] == "custom"))
     cg.add(var.set_mix_stereo_to_mono(config[CONF_MIX_STEREO_TO_MONO]))
+
+    # Stereo dual-mic: both I2S L+R slots are discrete microphones (e.g. ICS-43434 pairs)
+    cg.add(var.set_stereo_dual_mic(config[CONF_STEREO_DUAL_MIC]))
 
     # AEC reference mode (only relevant for no-codec setups)
     cg.add(var.set_aec_reference_mode(config[CONF_AEC_REFERENCE_MODE] == "ring_buffer"))
