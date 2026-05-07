@@ -572,6 +572,9 @@ void I2SAudioDuplex::dump_config() {
   }
   ESP_LOGCONFIG(TAG, "  TX Channels: %u (%s)", this->num_channels_,
                 this->num_channels_ == 2 ? "stereo" : "mono");
+  if (this->mix_stereo_to_mono_) {
+    ESP_LOGCONFIG(TAG, " Mix Stereo to Mono: enabled");
+  }
   ESP_LOGCONFIG(TAG, "  RX Mic Channel: %s", this->mic_channel_right_ ? "RIGHT" : "LEFT");
   static const char *const fmt_names[] = {"Philips", "MSB", "PCM Short", "PCM Long"};
   ESP_LOGCONFIG(TAG, "  Comm Format: %s", fmt_names[this->i2s_comm_fmt_ & 3]);
