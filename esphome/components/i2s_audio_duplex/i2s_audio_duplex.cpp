@@ -1548,6 +1548,16 @@ void I2SAudioDuplex::process_rx_path_(AudioTaskCtx &ctx) {
   ctx.consecutive_i2s_errors = 0;
   
   // TEMPORARY DEBUG: Log first 4 stereo samples to verify both channels have data
+if (this->mix_stereo_to_mono_) {
+    // Log first 4 stereo samples every 50 frames
+    static int frame = 0;
+    if (++frame % 50 == 0) {
+        auto *s = reinterpret_cast<int16_t*>(ctx.rx_buffer);
+        ESP_LOGI(TAG, "RAW[%d]: L0=%d R0=%d L1=%d R1=%d L2=%d R2=%d L3=%d R3=%d",
+                 frame, s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]);
+    }
+}
+        
   if (this->mix_stereo_to_mono_) {
     if (ctx.i2s_bps == 4) {
       auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
