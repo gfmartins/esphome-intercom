@@ -1601,15 +1601,40 @@ void I2SAudioDuplex::process_rx_path_(AudioTaskCtx &ctx) {
       this->rx_decimator_.process_multi(ctx.rx_buffer, ctx.input_frame_size, 2, ch_offsets,
           nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1);
     }
-  } else if (ctx.ratio > 1) {
+ } else if (ctx.ratio > 1) {
     // Mono with decimation
     if (ctx.i2s_bps == 4) {
-      auto *src32 = reinterpret_cast<const int32_t *>(ctx.rx_buffer);
+      auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
       this->mic_decimator_.process_strided_32(src32, ctx.mic_buffer, ctx.input_frame_size, 1, 0);
     } else {
       this->mic_decimator_.process(ctx.rx_buffer, ctx.mic_buffer, ctx.bus_frame_size);
     }
+  } else if (this->mix_stereo_to_mono_) {
+    // Stereo-to-mono mix: sum L+R channels, divide by 2 with clipping protection
+    // Both mics share DIN pin, outputting on left/right phases of LRCLK
+    if (ctx.i2s_bps == 4) {
+      auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
+      for (size_t i = 0; i < ctx.input_frame_size; i++) {
+        int32_t left = src32[i * 2] >> 16;
+        int32_t right = src32[i * 2 + 1] >> 16;
+        int32_t sum = (left + right) / 2;
+        if (sum > 32767) sum = 32767;
+        if (sum < -32768) sum = -32768;
+        ctx.mic_buffer[i] = static_cast<int16_t>(sum);
+      }
+    } else {
+      for (size_t i = 0; i < ctx.input_frame_size; i++) {
+        int32_t left = ctx.rx_buffer[i * 2];
+        int32_t right = ctx.rx_buffer[i * 2 + 1];
+        int32_t sum = (left + right) / 2;
+        if (sum > 32767) sum = 32767;
+        if (sum < -32768) sum = -32768;
+        ctx.mic_buffer[i] = static_cast<int16_t>(sum);
+      }
+    }
+    ESP_LOGD(TAG, "Stereo mixed to mono: %u samples", (unsigned)ctx.input_frame_size);
   }
+  // else: Mono without decimation: mic_buffer == rx_buffer (aliased), nothing to do
   // else: Mono without decimation: mic_buffer == rx_buffer (aliased), nothing to do
 
   // Fused loop: DC offset + mic attenuation in one pass.
