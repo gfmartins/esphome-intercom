@@ -1613,14 +1613,6 @@ void I2SAudioDuplex::process_rx_path_(AudioTaskCtx &ctx) {
       this->rx_decimator_.process_multi(ctx.rx_buffer, ctx.input_frame_size, 2, ch_offsets,
           nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1);
     }
-  } else if (ctx.ratio > 1) {
-    // Mono with decimation
-    if (ctx.i2s_bps == 4) {
-      auto *src32 = reinterpret_cast<const int32_t *>(ctx.rx_buffer);
-      this->mic_decimator_.process_strided_32(src32, ctx.mic_buffer, ctx.input_frame_size, 1, 0);
-    } else {
-      this->mic_decimator_.process(ctx.rx_buffer, ctx.mic_buffer, ctx.bus_frame_size);
-    }
   } else if (ctx.use_stereo_dual_mic) {
     // ── STEREO DUAL MIC (discrete I2S mics, no hardware ref channel) ──
     // Both L and R slots are microphones. Deinterleave directly into processor_mic_buffer
@@ -1637,7 +1629,15 @@ void I2SAudioDuplex::process_rx_path_(AudioTaskCtx &ctx) {
     // processor_input → interleaved dual-mic buffer; mic_buffer → first mic (even indices)
     ctx.processor_input = ctx.processor_mic_buffer;
     ctx.mic_buffer = ctx.processor_mic_buffer;  // DC/atten loop reads mic1 from even indices
-  }
+  } else if (ctx.ratio > 1) {
+    // Mono with decimation
+    if (ctx.i2s_bps == 4) {
+      auto *src32 = reinterpret_cast<const int32_t *>(ctx.rx_buffer);
+      this->mic_decimator_.process_strided_32(src32, ctx.mic_buffer, ctx.input_frame_size, 1, 0);
+    } else {
+      this->mic_decimator_.process(ctx.rx_buffer, ctx.mic_buffer, ctx.bus_frame_size);
+    }
+  } 
   // else: Mono without decimation: mic_buffer == rx_buffer (aliased), nothing to do
 
   // Fused loop: DC offset + mic attenuation in one pass.
