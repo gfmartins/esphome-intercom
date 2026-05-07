@@ -1618,37 +1618,38 @@ void I2SAudioDuplex::process_rx_path_(AudioTaskCtx &ctx) {
                                         nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1);
     }
   } else if (this->mix_stereo_to_mono_) {
-    // ── STEREO-TO-MONO MIX (both I2S channels summed) ──
-    // Handles both decimation (ratio>1) and passthrough (ratio==1)
-    // Step 1: Mix L+R from stereo rx_buffer into mono rx_buffer (in-place, first half)
+    // ── STEREO-TO-MONO MIX ──
     if (ctx.i2s_bps == 4) {
-      auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
-      for (size_t i = 0; i < ctx.bus_frame_size; i++) {
-        int32_t left = src32[i * 2] >> 16;
-        int32_t right = src32[i * 2 + 1] >> 16;
-        int32_t sum = (left + right) / 2;
-        if (sum > 32767) sum = 32767;
-        if (sum < -32768) sum = -32768;
-        ctx.rx_buffer[i] = static_cast<int16_t>(sum);
-      }
+        auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
+        for (size_t i = 0; i < ctx.bus_frame_size; i++) {
+            int32_t left = src32[i * 2] >> 16;
+            int32_t right = src32[i * 2 + 1] >> 16;
+            int32_t sum = (left + right) / 2;
+            if (sum > 32767) sum = 32767;
+            if (sum < -32768) sum = -32768;
+            ctx.rx_buffer[i] = static_cast<int16_t>(sum);
+        }
     } else {
-      for (size_t i = 0; i < ctx.bus_frame_size; i++) {
-        int32_t left = ctx.rx_buffer[i * 2];
-        int32_t right = ctx.rx_buffer[i * 2 + 1];
-        int32_t sum = (left + right) / 2;
-        if (sum > 32767) sum = 32767;
-        if (sum < -32768) sum = -32768;
-        ctx.rx_buffer[i] = static_cast<int16_t>(sum);
-      }
+        for (size_t i = 0; i < ctx.bus_frame_size; i++) {
+            int32_t left = ctx.rx_buffer[i * 2];
+            int32_t right = ctx.rx_buffer[i * 2 + 1];
+            int32_t sum = (left + right) / 2;
+            if (sum > 32767) sum = 32767;
+            if (sum < -32768) sum = -32768;
+            ctx.rx_buffer[i] = static_cast<int16_t>(sum);
+        }
     }
-    // Step 2: Decimate if needed, or copy to mic_buffer
+    
     if (ctx.ratio > 1) {
-      this->mic_decimator_.process(ctx.rx_buffer, ctx.mic_buffer, ctx.bus_frame_size);
+        this->mic_decimator_.process(ctx.rx_buffer, ctx.mic_buffer, ctx.bus_frame_size);
     } else {
-      // ratio==1: mic_buffer == rx_buffer (aliased), mix already done in-place
-      // No copy needed
+        // ratio==1: mic_buffer == rx_buffer, mix already done in-place
     }
-  } else if (ctx.ratio > 1) {
+    
+    // CRITICAL: Set output pointers so AEC and callbacks work
+    ctx.output_buffer = ctx.mic_buffer;
+    ctx.processor_input = ctx.mic_buffer;
+} else if (ctx.ratio > 1) {
     // Mono with decimation (original behavior)
     if (ctx.i2s_bps == 4) {
       auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
