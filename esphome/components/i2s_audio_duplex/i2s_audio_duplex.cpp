@@ -811,16 +811,16 @@ bool I2SAudioDuplex::init_i2s_duplex_() {
     // RX configuration - always independent of TX num_channels
     i2s_std_config_t rx_cfg = tx_cfg;
     if (this->use_stereo_aec_ref_ || this->mix_stereo_to_mono_) {
-       rx_cfg.slot_cfg = get_std_slot_config(this->i2s_comm_fmt_, bit_width, I2S_SLOT_MODE_STEREO);
-       rx_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
-       if (this->use_stereo_aec_ref_) {
-          ESP_LOGD(TAG, "RX configured as STEREO for ES8311 digital feedback AEC");
-       } else {
-          ESP_LOGD(TAG, "RX configured as STEREO for mix_stereo_to_mono");
-       }
+      rx_cfg.slot_cfg = get_std_slot_config(this->i2s_comm_fmt_, bit_width, I2S_SLOT_MODE_STEREO);
+      rx_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
+      if (this->use_stereo_aec_ref_) {
+        ESP_LOGD(TAG, "RX configured as STEREO for ES8311 digital feedback AEC");
+      } else {
+        ESP_LOGD(TAG, "RX configured as STEREO for mix_stereo_to_mono");
+      }
     } else {
-       rx_cfg.slot_cfg = get_std_slot_config(this->i2s_comm_fmt_, bit_width, I2S_SLOT_MODE_MONO);
-       rx_cfg.slot_cfg.slot_mask = this->mic_channel_right_ ? I2S_STD_SLOT_RIGHT : I2S_STD_SLOT_LEFT;
+      rx_cfg.slot_cfg = get_std_slot_config(this->i2s_comm_fmt_, bit_width, I2S_SLOT_MODE_MONO);
+      rx_cfg.slot_cfg.slot_mask = this->mic_channel_right_ ? I2S_STD_SLOT_RIGHT : I2S_STD_SLOT_LEFT;
     }
     // Apply slot_bit_width override to RX
     if (slot_bw != I2S_SLOT_BIT_WIDTH_AUTO) {
@@ -1340,7 +1340,7 @@ void I2SAudioDuplex::audio_session_() {
   ctx.bus_frame_bytes = ctx.bus_frame_size * sizeof(int16_t);
   if (ctx.use_tdm_ref) {
     ctx.rx_frame_bytes = ctx.bus_frame_size * ctx.tdm_total_slots * ctx.i2s_bps;
-  } else if (ctx.use_stereo_aec_ref) {
+  } else if (ctx.use_stereo_aec_ref || this->mix_stereo_to_mono_) {
     ctx.rx_frame_bytes = ctx.bus_frame_size * 2 * ctx.i2s_bps;
   } else {
     ctx.rx_frame_bytes = ctx.bus_frame_size * ctx.i2s_bps;
@@ -1546,6 +1546,16 @@ void I2SAudioDuplex::process_rx_path_(AudioTaskCtx &ctx) {
     return;
 
   ctx.consecutive_i2s_errors = 0;
+  
+  // TEMPORARY DEBUG: Log first 4 stereo samples to verify both channels have data
+  if (this->mix_stereo_to_mono_) {
+    if (ctx.i2s_bps == 4) {
+      auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
+      ESP_LOGD(TAG, "STereo sample[0]: L=%d R=%d", (int)(src32[0] >> 16), (int)(src32[1] >> 16));
+    } else {
+      ESP_LOGD(TAG, "STereo sample[0]: L=%d R=%d", (int)ctx.rx_buffer[0], (int)ctx.rx_buffer[1]);
+    }
+  }
 
   // Convert 32-bit I2S samples to 16-bit only when FIR strided does NOT handle it.
   // When ratio > 1, the FIR decimator reads 32-bit directly via process_strided_32.
@@ -1581,14 +1591,14 @@ void I2SAudioDuplex::process_rx_path_(AudioTaskCtx &ctx) {
       num_mic_ch = 1;
     }
     if (ctx.i2s_bps == 4) {
-      auto *src32 = reinterpret_cast<const int32_t *>(ctx.rx_buffer);
+      auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
       this->rx_decimator_.process_multi_32(src32, ctx.input_frame_size, ts, ch_offsets,
-          dual_mic ? ctx.processor_mic_buffer : nullptr, ctx.mic_buffer,
-          ctx.spk_ref_buffer, num_mic_ch);
+                                           dual_mic ? ctx.processor_mic_buffer : nullptr, ctx.mic_buffer,
+                                           ctx.spk_ref_buffer, num_mic_ch);
     } else {
       this->rx_decimator_.process_multi(ctx.rx_buffer, ctx.input_frame_size, ts, ch_offsets,
-          dual_mic ? ctx.processor_mic_buffer : nullptr, ctx.mic_buffer,
-          ctx.spk_ref_buffer, num_mic_ch);
+                                        dual_mic ? ctx.processor_mic_buffer : nullptr, ctx.mic_buffer,
+                                        ctx.spk_ref_buffer, num_mic_ch);
     }
     if (dual_mic) {
       ctx.processor_input = ctx.processor_mic_buffer;
@@ -1596,50 +1606,56 @@ void I2SAudioDuplex::process_rx_path_(AudioTaskCtx &ctx) {
   } else
 #endif
   if (ctx.use_stereo_aec_ref) {
-    // Stereo: mic + ref via multi-channel FIR
     const uint8_t mi = ctx.ref_channel_right ? 0 : 1;
     const uint8_t ri = ctx.ref_channel_right ? 1 : 0;
     uint8_t ch_offsets[2] = {mi, ri};
     if (ctx.i2s_bps == 4) {
-      auto *src32 = reinterpret_cast<const int32_t *>(ctx.rx_buffer);
+      auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
       this->rx_decimator_.process_multi_32(src32, ctx.input_frame_size, 2, ch_offsets,
-          nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1);
+                                           nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1);
     } else {
       this->rx_decimator_.process_multi(ctx.rx_buffer, ctx.input_frame_size, 2, ch_offsets,
-          nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1);
+                                        nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1);
     }
- } else if (ctx.ratio > 1) {
-    // Mono with decimation
+  } else if (this->mix_stereo_to_mono_) {
+    // ── STEREO-TO-MONO MIX (both I2S channels summed) ──
+    // Handles both decimation (ratio>1) and passthrough (ratio==1)
+    // Step 1: Mix L+R from stereo rx_buffer into mono rx_buffer (in-place, first half)
+    if (ctx.i2s_bps == 4) {
+      auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
+      for (size_t i = 0; i < ctx.bus_frame_size; i++) {
+        int32_t left = src32[i * 2] >> 16;
+        int32_t right = src32[i * 2 + 1] >> 16;
+        int32_t sum = (left + right) / 2;
+        if (sum > 32767) sum = 32767;
+        if (sum < -32768) sum = -32768;
+        ctx.rx_buffer[i] = static_cast<int16_t>(sum);
+      }
+    } else {
+      for (size_t i = 0; i < ctx.bus_frame_size; i++) {
+        int32_t left = ctx.rx_buffer[i * 2];
+        int32_t right = ctx.rx_buffer[i * 2 + 1];
+        int32_t sum = (left + right) / 2;
+        if (sum > 32767) sum = 32767;
+        if (sum < -32768) sum = -32768;
+        ctx.rx_buffer[i] = static_cast<int16_t>(sum);
+      }
+    }
+    // Step 2: Decimate if needed, or copy to mic_buffer
+    if (ctx.ratio > 1) {
+      this->mic_decimator_.process(ctx.rx_buffer, ctx.mic_buffer, ctx.bus_frame_size);
+    } else {
+      // ratio==1: mic_buffer == rx_buffer (aliased), mix already done in-place
+      // No copy needed
+    }
+  } else if (ctx.ratio > 1) {
+    // Mono with decimation (original behavior)
     if (ctx.i2s_bps == 4) {
       auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
       this->mic_decimator_.process_strided_32(src32, ctx.mic_buffer, ctx.input_frame_size, 1, 0);
     } else {
       this->mic_decimator_.process(ctx.rx_buffer, ctx.mic_buffer, ctx.bus_frame_size);
     }
-  } else if (this->mix_stereo_to_mono_) {
-    // Stereo-to-mono mix: sum L+R channels, divide by 2 with clipping protection
-    // Both mics share DIN pin, outputting on left/right phases of LRCLK
-    if (ctx.i2s_bps == 4) {
-      auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
-      for (size_t i = 0; i < ctx.input_frame_size; i++) {
-        int32_t left = src32[i * 2] >> 16;
-        int32_t right = src32[i * 2 + 1] >> 16;
-        int32_t sum = (left + right) / 2;
-        if (sum > 32767) sum = 32767;
-        if (sum < -32768) sum = -32768;
-        ctx.mic_buffer[i] = static_cast<int16_t>(sum);
-      }
-    } else {
-      for (size_t i = 0; i < ctx.input_frame_size; i++) {
-        int32_t left = ctx.rx_buffer[i * 2];
-        int32_t right = ctx.rx_buffer[i * 2 + 1];
-        int32_t sum = (left + right) / 2;
-        if (sum > 32767) sum = 32767;
-        if (sum < -32768) sum = -32768;
-        ctx.mic_buffer[i] = static_cast<int16_t>(sum);
-      }
-    }
-    ESP_LOGD(TAG, "Stereo mixed to mono: %u samples", (unsigned)ctx.input_frame_size);
   }
   // else: Mono without decimation: mic_buffer == rx_buffer (aliased), nothing to do
   // else: Mono without decimation: mic_buffer == rx_buffer (aliased), nothing to do
