@@ -1547,25 +1547,6 @@ void I2SAudioDuplex::process_rx_path_(AudioTaskCtx &ctx) {
 
   ctx.consecutive_i2s_errors = 0;
   
-  // TEMPORARY DEBUG: Log first 4 stereo samples to verify both channels have data
-if (this->mix_stereo_to_mono_) {
-    // Log first 4 stereo samples every 50 frames
-    static int frame = 0;
-    if (++frame % 50 == 0) {
-        auto *s = reinterpret_cast<int16_t*>(ctx.rx_buffer);
-        ESP_LOGI(TAG, "RAW[%d]: L0=%d R0=%d L1=%d R1=%d L2=%d R2=%d L3=%d R3=%d",
-                 frame, s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]);
-    }
-}
-        
-  if (this->mix_stereo_to_mono_) {
-    if (ctx.i2s_bps == 4) {
-      auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
-      ESP_LOGD(TAG, "STereo sample[0]: L=%d R=%d", (int)(src32[0] >> 16), (int)(src32[1] >> 16));
-    } else {
-      ESP_LOGD(TAG, "STereo sample[0]: L=%d R=%d", (int)ctx.rx_buffer[0], (int)ctx.rx_buffer[1]);
-    }
-  }
 
   // Convert 32-bit I2S samples to 16-bit only when FIR strided does NOT handle it.
   // When ratio > 1, the FIR decimator reads 32-bit directly via process_strided_32.
@@ -1628,46 +1609,33 @@ if (this->mix_stereo_to_mono_) {
                                         nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1);
     }
   } else if (this->mix_stereo_to_mono_) {
-  ESP_LOGD(TAG, "Mixing stereo to mono (bus_rate=%u, bps=%u)", 
-           (unsigned)this->sample_rate_, ctx.i2s_bps);
-
-  // Convert 32-bit to 16-bit if needed (before mixing)
+  // Convert 32-bit to 16-bit if necessary
   if (ctx.i2s_bps == 4) {
     auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
-    size_t total_samples = ctx.bus_frame_size * 2;  // L+R
-    for (size_t i = 0; i < total_samples; i++) {
+    for (size_t i = 0; i < ctx.bus_frame_size * 2; i++) {
       ctx.rx_buffer[i] = static_cast<int16_t>(src32[i] >> 16);
     }
   }
 
-  // Simple average mix + optional balancing
-  int32_t sum_left = 0, sum_right = 0;
+  // Smart mixing: use dominant channel or average if both active
   for (size_t i = 0; i < ctx.bus_frame_size; i++) {
     int16_t left  = ctx.rx_buffer[i * 2];
     int16_t right = ctx.rx_buffer[i * 2 + 1];
-    sum_left  += abs(left);
-    sum_right += abs(right);
-  }
 
-  float gain_l = 1.0f;
-  float gain_r = 1.0f;
-  if (sum_right > sum_left * 4) {           // very unbalanced
-    gain_r = (float)sum_left / sum_right;
-  } else if (sum_left > sum_right * 4) {
-    gain_l = (float)sum_right / sum_left;
-  }
+    int32_t mixed;
+    if (abs(left) > abs(right) * 4) {
+      mixed = left;                    // Left much stronger
+    } else if (abs(right) > abs(left) * 4) {
+      mixed = right;                   // Right much stronger (your case)
+    } else {
+      mixed = (left + right) / 2;      // Both similar → average
+    }
 
-  for (size_t i = 0; i < ctx.bus_frame_size; i++) {
-    int16_t left  = ctx.rx_buffer[i * 2];
-    int16_t right = ctx.rx_buffer[i * 2 + 1];
-    
-    int32_t mixed = (int32_t)(left * gain_l) + (int32_t)(right * gain_r);
-    mixed >>= 1;  // divide by 2 (average)
-
+    // Clip
     if (mixed > 32767) mixed = 32767;
     if (mixed < -32768) mixed = -32768;
 
-    ctx.rx_buffer[i] = (int16_t)mixed;   // overwrite in-place as mono
+    ctx.rx_buffer[i] = static_cast<int16_t>(mixed);
   }
 
   // Decimate if needed
