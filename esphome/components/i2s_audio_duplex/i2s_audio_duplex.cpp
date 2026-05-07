@@ -807,13 +807,17 @@ bool I2SAudioDuplex::init_i2s_duplex_() {
 
     // RX configuration - always independent of TX num_channels
     i2s_std_config_t rx_cfg = tx_cfg;
-    if (this->use_stereo_aec_ref_) {
-      rx_cfg.slot_cfg = get_std_slot_config(this->i2s_comm_fmt_, bit_width, I2S_SLOT_MODE_STEREO);
-      rx_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
-      ESP_LOGD(TAG, "RX configured as STEREO for ES8311 digital feedback AEC");
+    if (this->use_stereo_aec_ref_ || this->mix_stereo_to_mono_) {
+       rx_cfg.slot_cfg = get_std_slot_config(this->i2s_comm_fmt_, bit_width, I2S_SLOT_MODE_STEREO);
+       rx_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
+       if (this->use_stereo_aec_ref_) {
+          ESP_LOGD(TAG, "RX configured as STEREO for ES8311 digital feedback AEC");
+       } else {
+          ESP_LOGD(TAG, "RX configured as STEREO for mix_stereo_to_mono");
+       }
     } else {
-      rx_cfg.slot_cfg = get_std_slot_config(this->i2s_comm_fmt_, bit_width, I2S_SLOT_MODE_MONO);
-      rx_cfg.slot_cfg.slot_mask = this->mic_channel_right_ ? I2S_STD_SLOT_RIGHT : I2S_STD_SLOT_LEFT;
+       rx_cfg.slot_cfg = get_std_slot_config(this->i2s_comm_fmt_, bit_width, I2S_SLOT_MODE_MONO);
+       rx_cfg.slot_cfg.slot_mask = this->mic_channel_right_ ? I2S_STD_SLOT_RIGHT : I2S_STD_SLOT_LEFT;
     }
     // Apply slot_bit_width override to RX
     if (slot_bw != I2S_SLOT_BIT_WIDTH_AUTO) {
