@@ -1628,60 +1628,52 @@ if (this->mix_stereo_to_mono_) {
                                         nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1);
     }
   } else if (this->mix_stereo_to_mono_) {
-    // ── STEREO-TO-MONO MIX WITH GAIN BALANCING ──
-    
-    // Calculate RMS of each channel to estimate relative levels
-    int64_t sum_left = 0, sum_right = 0;
-    for (size_t i = 0; i < ctx.bus_frame_size; i++) {
-        int32_t left = (ctx.i2s_bps == 4) ? 
-            (reinterpret_cast<int32_t*>(ctx.rx_buffer)[i * 2] >> 16) : 
-            ctx.rx_buffer[i * 2];
-        int32_t right = (ctx.i2s_bps == 4) ? 
-            (reinterpret_cast<int32_t*>(ctx.rx_buffer)[i * 2 + 1] >> 16) : 
-            ctx.rx_buffer[i * 2 + 1];
-        sum_left += left * left;
-        sum_right += right * right;
+  ESP_LOGD(TAG, "Mixing stereo to mono (bus_rate=%u, bps=%u)", 
+           (unsigned)this->sample_rate_, ctx.i2s_bps);
+
+  // Convert 32-bit to 16-bit if needed (before mixing)
+  if (ctx.i2s_bps == 4) {
+    auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
+    size_t total_samples = ctx.bus_frame_size * 2;  // L+R
+    for (size_t i = 0; i < total_samples; i++) {
+      ctx.rx_buffer[i] = static_cast<int16_t>(src32[i] >> 16);
     }
+  }
+
+  // Simple average mix + optional balancing
+  int32_t sum_left = 0, sum_right = 0;
+  for (size_t i = 0; i < ctx.bus_frame_size; i++) {
+    int16_t left  = ctx.rx_buffer[i * 2];
+    int16_t right = ctx.rx_buffer[i * 2 + 1];
+    sum_left  += abs(left);
+    sum_right += abs(right);
+  }
+
+  float gain_l = 1.0f;
+  float gain_r = 1.0f;
+  if (sum_right > sum_left * 4) {           // very unbalanced
+    gain_r = (float)sum_left / sum_right;
+  } else if (sum_left > sum_right * 4) {
+    gain_l = (float)sum_right / sum_left;
+  }
+
+  for (size_t i = 0; i < ctx.bus_frame_size; i++) {
+    int16_t left  = ctx.rx_buffer[i * 2];
+    int16_t right = ctx.rx_buffer[i * 2 + 1];
     
-    // Calculate gain factors to balance channels
-    float rms_left = sqrt((float)sum_left / ctx.bus_frame_size);
-    float rms_right = sqrt((float)sum_right / ctx.bus_frame_size);
-    float gain_left = 1.0f;
-    float gain_right = 1.0f;
-    
-    // If one channel is much louder, attenuate it
-    if (rms_right > rms_left * 2.0f) {
-        gain_right = rms_left / rms_right;
-        ESP_LOGW(TAG, "Right channel too loud: %.0f vs %.0f, attenuating by %.2f", 
-                 rms_right, rms_left, gain_right);
-    } else if (rms_left > rms_right * 2.0f) {
-        gain_left = rms_right / rms_left;
-        ESP_LOGW(TAG, "Left channel too loud: %.0f vs %.0f, attenuating by %.2f", 
-                 rms_left, rms_right, gain_left);
-    }
-    
-    // Mix with balanced gains
-    for (size_t i = 0; i < ctx.bus_frame_size; i++) {
-        int32_t left, right;
-        if (ctx.i2s_bps == 4) {
-            auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
-            left = (src32[i * 2] >> 16);
-            right = (src32[i * 2 + 1] >> 16);
-        } else {
-            left = ctx.rx_buffer[i * 2];
-            right = ctx.rx_buffer[i * 2 + 1];
-        }
-        
-        int32_t sum = (int32_t)(left * gain_left + right * gain_right) / 2;
-        if (sum > 32767) sum = 32767;
-        if (sum < -32768) sum = -32768;
-        ctx.rx_buffer[i] = static_cast<int16_t>(sum);
-    }
-    
-    // Decimate if needed
-    if (ctx.ratio > 1) {
-        this->mic_decimator_.process(ctx.rx_buffer, ctx.mic_buffer, ctx.bus_frame_size);
-    }
+    int32_t mixed = (int32_t)(left * gain_l) + (int32_t)(right * gain_r);
+    mixed >>= 1;  // divide by 2 (average)
+
+    if (mixed > 32767) mixed = 32767;
+    if (mixed < -32768) mixed = -32768;
+
+    ctx.rx_buffer[i] = (int16_t)mixed;   // overwrite in-place as mono
+  }
+
+  // Decimate if needed
+  if (ctx.ratio > 1) {
+    this->mic_decimator_.process(ctx.rx_buffer, ctx.mic_buffer, ctx.bus_frame_size);
+  }
 } else if (ctx.ratio > 1) {
     // Mono with decimation (original behavior)
     if (ctx.i2s_bps == 4) {
