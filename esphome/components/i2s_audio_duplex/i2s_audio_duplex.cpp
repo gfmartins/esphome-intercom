@@ -1617,21 +1617,18 @@ void I2SAudioDuplex::process_rx_path_(AudioTaskCtx &ctx) {
     }
   } else if (ctx.use_stereo_dual_mic) {
     // ── STEREO DUAL MIC (discrete I2S mics, no hardware ref channel) ──
-    // Both L and R slots are microphones. Deinterleave directly into processor_mic_buffer
-    // as interleaved [mic1, mic2, mic1, mic2, ...] layout expected by esp_afe.
     uint8_t ch_offsets[2] = {0, 1};
     if (ctx.i2s_bps == 4) {
-      auto *src32 = reinterpret_cast<const int32_t *>(ctx.rx_buffer);
-      this->rx_decimator_.process_multi_32(src32, ctx.input_frame_size, 2, ch_offsets,
-          ctx.processor_mic_buffer, nullptr, nullptr, 2);
+        auto *src32 = reinterpret_cast<const int32_t *>(ctx.rx_buffer);
+        this->rx_decimator_.process_multi_32(src32, ctx.input_frame_size, 2, ch_offsets,
+            ctx.processor_mic_buffer, ctx.mic_buffer, nullptr, 2);
     } else {
-      this->rx_decimator_.process_multi(ctx.rx_buffer, ctx.input_frame_size, 2, ch_offsets,
-          ctx.processor_mic_buffer, nullptr, nullptr, 2);
+        this->rx_decimator_.process_multi(ctx.rx_buffer, ctx.input_frame_size, 2, ch_offsets,
+            ctx.processor_mic_buffer, ctx.mic_buffer, nullptr, 2);
     }
-    // processor_input → interleaved dual-mic buffer; mic_buffer → first mic (even indices)
-    ctx.processor_input = ctx.processor_mic_buffer;
-    ctx.mic_buffer = ctx.processor_mic_buffer;  // DC/atten loop reads mic1 from even indices
-  } else if (ctx.ratio > 1) {
+    ctx.processor_input = ctx.processor_mic_buffer;  // stereo for AFE
+    // mic_buffer now contains mono mic0 for raw callbacks (MWW)
+} else if (ctx.ratio > 1) {
     // Mono with decimation
     if (ctx.i2s_bps == 4) {
       auto *src32 = reinterpret_cast<const int32_t *>(ctx.rx_buffer);
