@@ -195,6 +195,9 @@ class I2SAudioDuplex : public Component {
   void set_tdm_mic_slot(uint8_t slot) { this->tdm_mic_slot_ = slot; }
   void set_secondary_tdm_mic_slot(int8_t slot) { this->tdm_second_mic_slot_ = slot; }
   void set_tdm_ref_slot(uint8_t slot) { this->tdm_ref_slot_ = slot; }
+
+  // Stereo dual-mic: both L+R I2S slots are discrete microphones (e.g. ICS-43434 pairs)
+  void set_stereo_dual_mic(bool v) { this->use_stereo_dual_mic_ = v; }
   void set_tdm_slot_level_sensor_enabled(uint8_t slot, bool enabled) {
     if (slot < 8) this->tdm_slot_level_sensor_enabled_[slot] = enabled;
   }
@@ -279,6 +282,7 @@ class I2SAudioDuplex : public Component {
     uint8_t num_ch{1};        // TX channels
     bool use_stereo_aec_ref{false};
     bool use_tdm_ref{false};
+    bool use_stereo_dual_mic{false};
     bool ref_channel_right{false};
     bool correct_dc_offset{false};
     uint8_t tdm_total_slots{0};
@@ -440,6 +444,7 @@ class I2SAudioDuplex : public Component {
   bool use_stereo_aec_ref_{false}; // ES8311 digital feedback: RX stereo with L=ref, R=mic
   bool fir_decimator_custom_{false}; // YAML fir_decimator: custom (vs default dsps_fird_s16)
   bool ref_channel_right_{false};  // Which channel is AEC reference: false=L, true=R
+  bool use_stereo_dual_mic_{false}; // Both I2S L+R slots are discrete mics (e.g. ICS-43434 pair)
 
   // TDM hardware reference (ES7210 in TDM mode)
   bool use_tdm_ref_{false};
