@@ -572,9 +572,6 @@ void I2SAudioDuplex::dump_config() {
   }
   ESP_LOGCONFIG(TAG, "  TX Channels: %u (%s)", this->num_channels_,
                 this->num_channels_ == 2 ? "stereo" : "mono");
-  if (this->mix_stereo_to_mono_) {
-    ESP_LOGCONFIG(TAG, " Mix Stereo to Mono: enabled");
-  }
   ESP_LOGCONFIG(TAG, "  RX Mic Channel: %s", this->mic_channel_right_ ? "RIGHT" : "LEFT");
   static const char *const fmt_names[] = {"Philips", "MSB", "PCM Short", "PCM Long"};
   ESP_LOGCONFIG(TAG, "  Comm Format: %s", fmt_names[this->i2s_comm_fmt_ & 3]);
@@ -810,14 +807,14 @@ bool I2SAudioDuplex::init_i2s_duplex_() {
 
     // RX configuration - always independent of TX num_channels
     i2s_std_config_t rx_cfg = tx_cfg;
-    if (this->use_stereo_aec_ref_ || this->mix_stereo_to_mono_) {
+    if (this->use_stereo_dual_mic_) {
       rx_cfg.slot_cfg = get_std_slot_config(this->i2s_comm_fmt_, bit_width, I2S_SLOT_MODE_STEREO);
       rx_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
-      if (this->use_stereo_aec_ref_) {
-        ESP_LOGD(TAG, "RX configured as STEREO for ES8311 digital feedback AEC");
-      } else {
-        ESP_LOGD(TAG, "RX configured as STEREO for mix_stereo_to_mono");
-      }
+      ESP_LOGD(TAG, "RX configured as STEREO DUAL MIC (discrete I2S mics)");
+    } else if (this->use_stereo_aec_ref_) {
+      rx_cfg.slot_cfg = get_std_slot_config(this->i2s_comm_fmt_, bit_width, I2S_SLOT_MODE_STEREO);
+      rx_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
+      ESP_LOGD(TAG, "RX configured as STEREO for ES8311 digital feedback AEC");
     } else {
       rx_cfg.slot_cfg = get_std_slot_config(this->i2s_comm_fmt_, bit_width, I2S_SLOT_MODE_MONO);
       rx_cfg.slot_cfg.slot_mask = this->mic_channel_right_ ? I2S_STD_SLOT_RIGHT : I2S_STD_SLOT_LEFT;
@@ -844,7 +841,9 @@ bool I2SAudioDuplex::init_i2s_duplex_() {
         this->deinit_i2s_();
         return false;
       }
-      ESP_LOGD(TAG, "RX channel initialized (%s)", this->use_stereo_aec_ref_ ? "stereo" : "mono");
+      ESP_LOGD(TAG, "RX channel initialized (%s)",
+               this->use_stereo_dual_mic_ ? "stereo-dual-mic" :
+               this->use_stereo_aec_ref_ ? "stereo" : "mono");
     }
   }
 
@@ -1151,7 +1150,7 @@ bool I2SAudioDuplex::allocate_audio_buffers_(AudioTaskCtx &ctx) {
   // Worst-case processor mic channels: 2 if dual-mic TDM is available, else 1.
   // Allocating for 2ch unconditionally when dual-mic is possible lets the task
   // flip between MR (1 mic) and MMR (2 mic) without reallocating on reconfigure.
-  const uint8_t worst_mic_ch = (this->tdm_second_mic_slot_ >= 0) ? 2 : 1;
+  const uint8_t worst_mic_ch = (this->tdm_second_mic_slot_ >= 0 || this->use_stereo_dual_mic_) ? 2 : 1;
   const size_t worst_processor_input_bytes = ctx.input_frame_bytes * worst_mic_ch;
 
   this->prealloc_rx_buffer_ = static_cast<int16_t *>(
@@ -1170,7 +1169,7 @@ bool I2SAudioDuplex::allocate_audio_buffers_(AudioTaskCtx &ctx) {
   this->prealloc_spk_buffer_ = static_cast<int16_t *>(
       heap_caps_malloc(ctx.bus_frame_size * ctx.num_ch * ctx.i2s_bps, buf_caps));
 
-  if (ctx.use_stereo_aec_ref || ctx.use_tdm_ref) {
+  if (ctx.use_stereo_aec_ref || ctx.use_tdm_ref || ctx.use_stereo_dual_mic) {
     this->prealloc_spk_ref_buffer_ = static_cast<int16_t *>(
         heap_caps_aligned_alloc(AEC_ALIGN, ctx.input_frame_bytes, buf_caps));
   }
@@ -1183,7 +1182,7 @@ bool I2SAudioDuplex::allocate_audio_buffers_(AudioTaskCtx &ctx) {
 
 #ifdef USE_AUDIO_PROCESSOR
   if (this->processor_ != nullptr && this->processor_->is_initialized()) {
-    if (!this->prealloc_spk_ref_buffer_ && !ctx.use_tdm_ref) {
+    if (!this->prealloc_spk_ref_buffer_ && !ctx.use_tdm_ref && !ctx.use_stereo_dual_mic) {
       this->prealloc_spk_ref_buffer_ = static_cast<int16_t *>(
           heap_caps_aligned_alloc(AEC_ALIGN, ctx.input_frame_bytes, buf_caps));
     }
@@ -1237,7 +1236,7 @@ bool I2SAudioDuplex::allocate_audio_buffers_(AudioTaskCtx &ctx) {
 #ifdef USE_AUDIO_PROCESSOR
   if (this->processor_ != nullptr && this->processor_->is_initialized()) {
     if (!this->prealloc_aec_output_) return false;
-    if ((ctx.use_stereo_aec_ref || ctx.use_tdm_ref) && !this->prealloc_spk_ref_buffer_) return false;
+    if ((ctx.use_stereo_aec_ref || ctx.use_tdm_ref || ctx.use_stereo_dual_mic) && !this->prealloc_spk_ref_buffer_) return false;
     // Mono AEC depends on direct_aec_ref_ as both the TX-side decimation scratch
     // and the previous-frame store. If it failed to allocate, the AEC would
     // silently run with a zero reference (TX writer is null-gated, ring writer
@@ -1293,6 +1292,7 @@ void I2SAudioDuplex::audio_session_() {
   ctx.num_ch = this->num_channels_;
   ctx.use_stereo_aec_ref = this->use_stereo_aec_ref_;
   ctx.use_tdm_ref = this->use_tdm_ref_;
+  ctx.use_stereo_dual_mic = this->use_stereo_dual_mic_;
   ctx.ref_channel_right = this->ref_channel_right_;
   ctx.correct_dc_offset = this->correct_dc_offset_;
   ctx.tdm_total_slots = this->tdm_total_slots_;
@@ -1324,10 +1324,15 @@ void I2SAudioDuplex::audio_session_() {
 #endif
 
   // Init multi-channel RX decimator now that we know channel count
-  if (ctx.use_tdm_ref || ctx.use_stereo_aec_ref) {
-    uint8_t rx_ch = ctx.use_tdm_ref
-        ? (ctx.processor_mic_channels > 1 ? 3 : 2)  // MMR or MR
-        : 2;  // stereo: mic + ref
+  if (ctx.use_tdm_ref || ctx.use_stereo_aec_ref || this->use_stereo_dual_mic_) {
+    uint8_t rx_ch;
+    if (this->use_stereo_dual_mic_) {
+      rx_ch = 2;  // two discrete mics, no ref channel
+    } else if (ctx.use_tdm_ref) {
+      rx_ch = (ctx.processor_mic_channels > 1) ? 3 : 2;  // MMR or MR
+    } else {
+      rx_ch = 2;  // stereo AEC ref: mic + ref
+    }
     this->rx_decimator_.init(ctx.ratio, rx_ch);
     this->rx_decimator_.set_use_float_fir(this->fir_decimator_custom_);
   }
@@ -1340,7 +1345,7 @@ void I2SAudioDuplex::audio_session_() {
   ctx.bus_frame_bytes = ctx.bus_frame_size * sizeof(int16_t);
   if (ctx.use_tdm_ref) {
     ctx.rx_frame_bytes = ctx.bus_frame_size * ctx.tdm_total_slots * ctx.i2s_bps;
-  } else if (ctx.use_stereo_aec_ref || this->mix_stereo_to_mono_) {
+  } else if (ctx.use_stereo_aec_ref || ctx.use_stereo_dual_mic) {
     ctx.rx_frame_bytes = ctx.bus_frame_size * 2 * ctx.i2s_bps;
   } else {
     ctx.rx_frame_bytes = ctx.bus_frame_size * ctx.i2s_bps;
@@ -1352,7 +1357,7 @@ void I2SAudioDuplex::audio_session_() {
   // (frame_spec change, feature toggle) reuse the same pointers without any
   // heap_caps_alloc calls, eliminating SPIRAM fragmentation that previously
   // caused "Failed to allocate AEC output buffer" after a few reconfigures.
-  ctx.mic_separate = (ctx.ratio > 1) || ctx.use_stereo_aec_ref || ctx.use_tdm_ref;
+  ctx.mic_separate = (ctx.ratio > 1) || ctx.use_stereo_aec_ref || ctx.use_tdm_ref || ctx.use_stereo_dual_mic;
 
   auto alloc_fail = [this](const char *what) {
     ESP_LOGE(TAG, "Failed to allocate %s", what);
@@ -1365,12 +1370,12 @@ void I2SAudioDuplex::audio_session_() {
     alloc_fail("unsupported processor mic channel count");
     goto cleanup;
   }
-  if (ctx.processor_mic_channels > 1 && !ctx.use_tdm_ref) {
-    alloc_fail("dual-mic processor requires TDM microphone slots");
+  if (ctx.processor_mic_channels > 1 && !ctx.use_tdm_ref && !this->use_stereo_dual_mic_) {
+    alloc_fail("dual-mic processor requires TDM microphone slots or stereo_dual_mic: true");
     goto cleanup;
   }
-  if (ctx.processor_mic_channels > 1 && ctx.tdm_second_mic_slot < 0) {
-    alloc_fail("dual-mic processor requires tdm_mic_slots with two slots");
+  if (ctx.processor_mic_channels > 1 && ctx.tdm_second_mic_slot < 0 && !this->use_stereo_dual_mic_) {
+    alloc_fail("dual-mic processor requires tdm_mic_slots with two slots, or stereo_dual_mic: true");
     goto cleanup;
   }
 
@@ -1546,7 +1551,6 @@ void I2SAudioDuplex::process_rx_path_(AudioTaskCtx &ctx) {
     return;
 
   ctx.consecutive_i2s_errors = 0;
-  
 
   // Convert 32-bit I2S samples to 16-bit only when FIR strided does NOT handle it.
   // When ratio > 1, the FIR decimator reads 32-bit directly via process_strided_32.
@@ -1582,14 +1586,14 @@ void I2SAudioDuplex::process_rx_path_(AudioTaskCtx &ctx) {
       num_mic_ch = 1;
     }
     if (ctx.i2s_bps == 4) {
-      auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
+      auto *src32 = reinterpret_cast<const int32_t *>(ctx.rx_buffer);
       this->rx_decimator_.process_multi_32(src32, ctx.input_frame_size, ts, ch_offsets,
-                                           dual_mic ? ctx.processor_mic_buffer : nullptr, ctx.mic_buffer,
-                                           ctx.spk_ref_buffer, num_mic_ch);
+          dual_mic ? ctx.processor_mic_buffer : nullptr, ctx.mic_buffer,
+          ctx.spk_ref_buffer, num_mic_ch);
     } else {
       this->rx_decimator_.process_multi(ctx.rx_buffer, ctx.input_frame_size, ts, ch_offsets,
-                                        dual_mic ? ctx.processor_mic_buffer : nullptr, ctx.mic_buffer,
-                                        ctx.spk_ref_buffer, num_mic_ch);
+          dual_mic ? ctx.processor_mic_buffer : nullptr, ctx.mic_buffer,
+          ctx.spk_ref_buffer, num_mic_ch);
     }
     if (dual_mic) {
       ctx.processor_input = ctx.processor_mic_buffer;
@@ -1597,61 +1601,43 @@ void I2SAudioDuplex::process_rx_path_(AudioTaskCtx &ctx) {
   } else
 #endif
   if (ctx.use_stereo_aec_ref) {
+    // Stereo: mic + ref via multi-channel FIR
     const uint8_t mi = ctx.ref_channel_right ? 0 : 1;
     const uint8_t ri = ctx.ref_channel_right ? 1 : 0;
     uint8_t ch_offsets[2] = {mi, ri};
     if (ctx.i2s_bps == 4) {
-      auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
+      auto *src32 = reinterpret_cast<const int32_t *>(ctx.rx_buffer);
       this->rx_decimator_.process_multi_32(src32, ctx.input_frame_size, 2, ch_offsets,
-                                           nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1);
+          nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1);
     } else {
       this->rx_decimator_.process_multi(ctx.rx_buffer, ctx.input_frame_size, 2, ch_offsets,
-                                        nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1);
+          nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1);
     }
-  } else if (this->mix_stereo_to_mono_) {
-  // Convert 32-bit to 16-bit if necessary
-  if (ctx.i2s_bps == 4) {
-    auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
-    for (size_t i = 0; i < ctx.bus_frame_size * 2; i++) {
-      ctx.rx_buffer[i] = static_cast<int16_t>(src32[i] >> 16);
-    }
-  }
-
-  // Smart mixing: use dominant channel or average if both active
-  for (size_t i = 0; i < ctx.bus_frame_size; i++) {
-    int16_t left  = ctx.rx_buffer[i * 2];
-    int16_t right = ctx.rx_buffer[i * 2 + 1];
-
-    int32_t mixed;
-    if (abs(left) > abs(right) * 4) {
-      mixed = left;                    // Left much stronger
-    } else if (abs(right) > abs(left) * 4) {
-      mixed = right;                   // Right much stronger (your case)
-    } else {
-      mixed = (left + right) / 2;      // Both similar → average
-    }
-
-    // Clip
-    if (mixed > 32767) mixed = 32767;
-    if (mixed < -32768) mixed = -32768;
-
-    ctx.rx_buffer[i] = static_cast<int16_t>(mixed);
-  }
-
-  // Decimate if needed
-  if (ctx.ratio > 1) {
-    this->mic_decimator_.process(ctx.rx_buffer, ctx.mic_buffer, ctx.bus_frame_size);
-  }
-} else if (ctx.ratio > 1) {
-    // Mono with decimation (original behavior)
+  } else if (ctx.ratio > 1) {
+    // Mono with decimation
     if (ctx.i2s_bps == 4) {
-      auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
+      auto *src32 = reinterpret_cast<const int32_t *>(ctx.rx_buffer);
       this->mic_decimator_.process_strided_32(src32, ctx.mic_buffer, ctx.input_frame_size, 1, 0);
     } else {
       this->mic_decimator_.process(ctx.rx_buffer, ctx.mic_buffer, ctx.bus_frame_size);
     }
+  } else if (ctx.use_stereo_dual_mic) {
+    // ── STEREO DUAL MIC (discrete I2S mics, no hardware ref channel) ──
+    // Both L and R slots are microphones. Deinterleave directly into processor_mic_buffer
+    // as interleaved [mic1, mic2, mic1, mic2, ...] layout expected by esp_afe.
+    uint8_t ch_offsets[2] = {0, 1};
+    if (ctx.i2s_bps == 4) {
+      auto *src32 = reinterpret_cast<const int32_t *>(ctx.rx_buffer);
+      this->rx_decimator_.process_multi_32(src32, ctx.input_frame_size, 2, ch_offsets,
+          ctx.processor_mic_buffer, nullptr, nullptr, 2);
+    } else {
+      this->rx_decimator_.process_multi(ctx.rx_buffer, ctx.input_frame_size, 2, ch_offsets,
+          ctx.processor_mic_buffer, nullptr, nullptr, 2);
+    }
+    // processor_input → interleaved dual-mic buffer; mic_buffer → first mic (even indices)
+    ctx.processor_input = ctx.processor_mic_buffer;
+    ctx.mic_buffer = ctx.processor_mic_buffer;  // DC/atten loop reads mic1 from even indices
   }
-  // else: Mono without decimation: mic_buffer == rx_buffer (aliased), nothing to do
   // else: Mono without decimation: mic_buffer == rx_buffer (aliased), nothing to do
 
   // Fused loop: DC offset + mic attenuation in one pass.
@@ -1768,12 +1754,14 @@ void I2SAudioDuplex::process_aec_and_callbacks_(AudioTaskCtx &ctx) {
   if (!ctx.use_tdm_ref && ctx.processor_ready &&
       ctx.spk_ref_buffer != nullptr && ctx.aec_output != nullptr &&
       // Stereo AEC: reference is embedded in I2S RX (L=DAC loopback), always available.
+      // Stereo dual-mic: two discrete mics + software speaker reference (fill_mono path).
       // Mono AEC: reference comes from speaker ring buffer, only valid when speaker is active.
       (ctx.use_stereo_aec_ref ||
+       ctx.use_stereo_dual_mic ||
        (ctx.speaker_running &&
         (ctx.now_ms - this->last_speaker_audio_ms_.load(std::memory_order_relaxed) <= AEC_ACTIVE_TIMEOUT_MS)))) {
 
-    // Mono mode: get AEC reference (direct from TX or ring buffer).
+    // Mono mode and stereo_dual_mic: get AEC reference (direct from TX or ring buffer).
     // Reference is post-volume PCM, no additional scaling (Espressif TYPE2 pattern).
     if (!ctx.use_stereo_aec_ref) {
       this->fill_mono_aec_reference_(ctx);
