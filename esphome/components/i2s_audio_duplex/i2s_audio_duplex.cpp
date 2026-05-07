@@ -1618,37 +1618,60 @@ void I2SAudioDuplex::process_rx_path_(AudioTaskCtx &ctx) {
                                         nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1);
     }
   } else if (this->mix_stereo_to_mono_) {
-    // ── STEREO-TO-MONO MIX ──
-    if (ctx.i2s_bps == 4) {
-        auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
-        for (size_t i = 0; i < ctx.bus_frame_size; i++) {
-            int32_t left = src32[i * 2] >> 16;
-            int32_t right = src32[i * 2 + 1] >> 16;
-            int32_t sum = (left + right) / 2;
-            if (sum > 32767) sum = 32767;
-            if (sum < -32768) sum = -32768;
-            ctx.rx_buffer[i] = static_cast<int16_t>(sum);
-        }
-    } else {
-        for (size_t i = 0; i < ctx.bus_frame_size; i++) {
-            int32_t left = ctx.rx_buffer[i * 2];
-            int32_t right = ctx.rx_buffer[i * 2 + 1];
-            int32_t sum = (left + right) / 2;
-            if (sum > 32767) sum = 32767;
-            if (sum < -32768) sum = -32768;
-            ctx.rx_buffer[i] = static_cast<int16_t>(sum);
-        }
+    // ── STEREO-TO-MONO MIX WITH GAIN BALANCING ──
+    
+    // Calculate RMS of each channel to estimate relative levels
+    int64_t sum_left = 0, sum_right = 0;
+    for (size_t i = 0; i < ctx.bus_frame_size; i++) {
+        int32_t left = (ctx.i2s_bps == 4) ? 
+            (reinterpret_cast<int32_t*>(ctx.rx_buffer)[i * 2] >> 16) : 
+            ctx.rx_buffer[i * 2];
+        int32_t right = (ctx.i2s_bps == 4) ? 
+            (reinterpret_cast<int32_t*>(ctx.rx_buffer)[i * 2 + 1] >> 16) : 
+            ctx.rx_buffer[i * 2 + 1];
+        sum_left += left * left;
+        sum_right += right * right;
     }
     
+    // Calculate gain factors to balance channels
+    float rms_left = sqrt((float)sum_left / ctx.bus_frame_size);
+    float rms_right = sqrt((float)sum_right / ctx.bus_frame_size);
+    float gain_left = 1.0f;
+    float gain_right = 1.0f;
+    
+    // If one channel is much louder, attenuate it
+    if (rms_right > rms_left * 2.0f) {
+        gain_right = rms_left / rms_right;
+        ESP_LOGW(TAG, "Right channel too loud: %.0f vs %.0f, attenuating by %.2f", 
+                 rms_right, rms_left, gain_right);
+    } else if (rms_left > rms_right * 2.0f) {
+        gain_left = rms_right / rms_left;
+        ESP_LOGW(TAG, "Left channel too loud: %.0f vs %.0f, attenuating by %.2f", 
+                 rms_left, rms_right, gain_left);
+    }
+    
+    // Mix with balanced gains
+    for (size_t i = 0; i < ctx.bus_frame_size; i++) {
+        int32_t left, right;
+        if (ctx.i2s_bps == 4) {
+            auto *src32 = reinterpret_cast<int32_t*>(ctx.rx_buffer);
+            left = (src32[i * 2] >> 16);
+            right = (src32[i * 2 + 1] >> 16);
+        } else {
+            left = ctx.rx_buffer[i * 2];
+            right = ctx.rx_buffer[i * 2 + 1];
+        }
+        
+        int32_t sum = (int32_t)(left * gain_left + right * gain_right) / 2;
+        if (sum > 32767) sum = 32767;
+        if (sum < -32768) sum = -32768;
+        ctx.rx_buffer[i] = static_cast<int16_t>(sum);
+    }
+    
+    // Decimate if needed
     if (ctx.ratio > 1) {
         this->mic_decimator_.process(ctx.rx_buffer, ctx.mic_buffer, ctx.bus_frame_size);
-    } else {
-        // ratio==1: mic_buffer == rx_buffer, mix already done in-place
     }
-    
-    // CRITICAL: Set output pointers so AEC and callbacks work
-    ctx.output_buffer = ctx.mic_buffer;
-    ctx.processor_input = ctx.mic_buffer;
 } else if (ctx.ratio > 1) {
     // Mono with decimation (original behavior)
     if (ctx.i2s_bps == 4) {
