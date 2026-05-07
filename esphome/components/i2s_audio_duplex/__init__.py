@@ -66,6 +66,7 @@ CONF_AEC_REF_BUFFER_MS = "aec_reference_buffer_ms"
 CONF_TELEMETRY = "telemetry"
 CONF_TELEMETRY_LOG_INTERVAL_FRAMES = "telemetry_log_interval_frames"
 CONF_FIR_DECIMATOR = "fir_decimator"
+CONF_MIX_STEREO_TO_MONO = "mix_stereo_to_mono"
 
 FIR_DECIMATOR_OPTIONS = ("custom", "dsps_fird_s16")
 
@@ -250,6 +251,9 @@ CONFIG_SCHEMA = cv.All(
         # the SIMD path is unreliable (e.g. ESP32-P4 RISC-V, esp-dsp #117/#102).
         cv.Optional(CONF_FIR_DECIMATOR, default="dsps_fird_s16"):
             cv.one_of(*FIR_DECIMATOR_OPTIONS, lower=True),
+        # Mix stereo I2S input (L+R) to mono before AEC processing.
+        # Useful for dual digital MEMS mics sharing one DIN pin.
+        cv.Optional(CONF_MIX_STEREO_TO_MONO, default=False): cv.boolean,
     }).extend(cv.COMPONENT_SCHEMA),
     _validate_sample_rates,
     _validate_tdm_config,
@@ -395,6 +399,7 @@ async def to_code(config):
     cg.add(var.set_buffers_in_psram(config[CONF_BUFFERS_IN_PSRAM]))
     cg.add(var.set_audio_stack_in_psram(config[CONF_AUDIO_STACK_IN_PSRAM]))
     cg.add(var.set_fir_decimator_custom(config[CONF_FIR_DECIMATOR] == "custom"))
+    cg.add(var.set_mix_stereo_to_mono(config[CONF_MIX_STEREO_TO_MONO]))
 
     # AEC reference mode (only relevant for no-codec setups)
     cg.add(var.set_aec_reference_mode(config[CONF_AEC_REFERENCE_MODE] == "ring_buffer"))
